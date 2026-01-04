@@ -44,28 +44,33 @@ export function renderStatisticsCard(
   const fontMono =
     "ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, 'Liberation Mono', 'Courier New', monospace";
 
+  const contribVal =
+    stats.contributionsAllTime === null ? "—" : formatNumber(stats.contributionsAllTime);
+
+  const locNotes: string[] = [];
+  locNotes.push(
+    `from ${formatNumber(stats.commitsCounted)} commits across ${stats.reposMatched}/${stats.reposScanned} repos`
+  );
+  if (stats.reposPending > 0) locNotes.push(`${stats.reposPending} repos pending stats (GitHub computing)`);
+  if (stats.reposFailed > 0) locNotes.push(`${stats.reposFailed} repos failed to read`);
+
   const rows: Array<{ icon: string; name: string; val: string; note?: string | null }> = [
     { icon: "☆", name: "Stars", val: formatNumber(stats.stars) },
     { icon: "⑂", name: "Forks", val: formatNumber(stats.forks) },
-    { icon: "⤴", name: "All-time contributions", val: formatNumber(stats.contributionsAllTime) },
+    { icon: "⤴", name: "All-time contributions", val: contribVal },
     {
       icon: "+",
       name: "Lines of code changed",
       val: formatNumber(stats.locChanged),
-      note:
-        stats.locSource === "commits"
-          ? `from ${stats.locItemsCounted} commits (default branches)`
-          : `from last ${stats.locItemsCounted} merged PRs`,
+      note: locNotes.join("\n"),
     },
     {
       icon: "◔",
       name: "Repository views (past two weeks)",
-      val: stats.views14d ? formatNumber(stats.views14d.totalViews) : "—",
-      note: stats.views14d
-        ? `(${stats.views14d.succeeded}/${stats.views14d.attempted} repos)`
-        : "enable include_traffic=true",
+      val: stats.views14d === null ? "—" : formatNumber(stats.views14d),
+      note: stats.views14d === null ? "enable include_traffic=true" : null,
     },
-    { icon: "▣", name: "Repositories with contributions", val: formatNumber(stats.reposContributedTo) },
+    { icon: "▣", name: "Repositories with contributions", val: formatNumber(stats.reposWithContributions) },
   ];
 
   // Layout
@@ -81,15 +86,15 @@ export function renderStatisticsCard(
   const rowFont = 13;
   const noteFont = 10;
 
-  const rowGap = 22;        // spacing per row
-  const noteGap = 14;       // distance from row baseline to note baseline
-  const extraAfterNote = 6; // extra space after note
+  const rowGap = 22;
+  const noteGap = 14;
+  const extraAfterNote = 6;
 
-  let y = 72; // first row baseline
-  const rowSvgs: string[] = [];
+  let y = 72;
+  const parts: string[] = [];
 
   for (const r of rows) {
-    rowSvgs.push(`
+    parts.push(`
       <text x="${iconX}" y="${y}" font-size="${rowFont}" fill="${muted}"
             font-family="${fontSans}" dominant-baseline="middle">${esc(r.icon)}</text>
       <text x="${labelX}" y="${y}" font-size="${rowFont}" fill="${label}"
@@ -98,18 +103,21 @@ export function renderStatisticsCard(
             font-family="${fontMono}" dominant-baseline="middle">${esc(r.val)}</text>
     `);
 
-    if (r.note) {
-      rowSvgs.push(`
-        <text x="${labelX}" y="${y + noteGap}" font-size="${noteFont}" fill="${muted}"
-              font-family="${fontSans}" dominant-baseline="middle">${esc(r.note)}</text>
-      `);
-      y += rowGap + noteGap + extraAfterNote;
+    const lines = r.note ? String(r.note).split("\n") : [];
+    if (lines.length) {
+      for (let i = 0; i < lines.length; i++) {
+        parts.push(`
+          <text x="${labelX}" y="${y + noteGap + i * (noteFont + 4)}"
+                font-size="${noteFont}" fill="${muted}"
+                font-family="${fontSans}" dominant-baseline="middle">${esc(lines[i])}</text>
+        `);
+      }
+      y += rowGap + noteGap + (lines.length - 1) * (noteFont + 4) + extraAfterNote;
     } else {
       y += rowGap;
     }
   }
 
-  // Dynamic height (prevents clipping and overlap)
   const height = y + 24;
 
   return `<?xml version="1.0" encoding="UTF-8"?>
@@ -132,7 +140,7 @@ export function renderStatisticsCard(
   </text>
 
   <g>
-    ${rowSvgs.join("\n")}
+    ${parts.join("\n")}
   </g>
 </svg>`;
 }

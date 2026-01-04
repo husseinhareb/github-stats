@@ -1,78 +1,61 @@
 const GITHUB_GRAPHQL = "https://api.github.com/graphql";
 const GITHUB_REST = "https://api.github.com";
 
-type RepoNode = {
-  nameWithOwner: string;
-  stargazerCount: number;
-  forkCount: number;
+type Repo = {
+  owner: string;
+  name: string;
+  fullName: string; // owner/name
+  stars: number;
+  forks: number;
   isFork: boolean;
+  isPrivate: boolean;
 };
 
-type PageInfo = {
-  hasNextPage: boolean;
-  endCursor: string | null;
+type ContributorWeek = { a: number; d: number; c: number };
+type ContributorStat = {
+  author: null | { login: string };
+  total: number; // commits
+  weeks: ContributorWeek[];
 };
 
-type RepoTotalsResponse = {
-  user: {
-    repositories: {
-      nodes: RepoNode[];
-      pageInfo: PageInfo;
-    };
-  };
-};
+type ViewerResponse = { login: string };
 
+type RepoContribToNode = { nameWithOwner: string };
 type ReposContributedToResponse = {
   user: {
     repositoriesContributedTo: {
-      totalCount: number;
+      nodes: RepoContribToNode[];
+      pageInfo: { hasNextPage: boolean; endCursor: string | null };
     };
   };
 };
 
-type UserCreatedAtResponse = {
-  user: {
-    createdAt: string;
-  };
-};
-
+type CreatedAtResponse = { user: { createdAt: string } };
 type YearContribResponse = {
   user: {
     contributionsCollection: {
-      contributionCalendar: {
-        totalContributions: number;
-      };
+      contributionCalendar: { totalContributions: number };
     };
   };
 };
 
-type MergedPrsResponse = {
-  user: {
-    pullRequests: {
-      nodes: Array<{ additions: number; deletions: number }>;
-      pageInfo: PageInfo;
-    };
-  };
-};
+async function restRequest<T>(path: string, token: string): Promise<{ res: Response; data: T }> {
+  const res = await fetch(`${GITHUB_REST}${path}`, {
+    headers: {
+      accept: "application/vnd.github+json",
+      authorization: `bearer ${token}`,
+      "x-github-api-version": "2022-11-28",
+    },
+  });
 
-type UserIdResponse = {
-  user: {
-    id: string;
-  };
-};
+  // some endpoints return 202 with no JSON body we can parse
+  if (res.status === 202) {
+    return { res, data: undefined as unknown as T };
+  }
 
-type RepoCommitHistoryResponse = {
-  repository: {
-    defaultBranchRef: null | {
-      target: null | {
-        history: {
-          nodes: Array<{ additions: number; deletions: number }>;
-          pageInfo: PageInfo;
-        };
-      };
-    };
-  };
-};
+  const data = (await res.json()) as T;
+  return { res, data };
+}
 
 async function graphqlRequest<T>(
   query: string,
@@ -89,14 +72,45 @@ async function graphqlRequest<T>(
   });
 
   const json: any = await res.json();
-
   if (!res.ok || json.errors) {
-    const msg =
-      json.errors?.map((e: any) => e.message).join("; ") || res.statusText;
+    const msg = json.errors?.map((e: any) => e.message).join("; ") || res.statusText;
     throw new Error(`GitHub GraphQL error: ${msg}`);
   }
-
   return json.data as T;
+}
+
+function parseLinkHeader(link: string | null): Record<string, string> {
+  if (!link) return {};
+  const out: Record<string, string> = {};
+  const parts = link.split(",");
+  for (const p of parts) {
+    const m = p.match(/<([^>]+)>;\s*rel="([^"]+)"/);
+    if (m) out[m[2]] = m[1];
+  }
+  return out;
+}
+
+async function paginateRest<T>(
+  firstPath: string,
+  token: string,
+  maxPages = 10
+): Promise<T[]> {
+  let urlPath = firstPath;
+  const all: T[] = [];
+  for (let i = 0; i < maxPages; i++) {
+    const { res, data } = await restRequest<T[]>(urlPath, token);
+    if (!res.ok) break;
+    all.push(...data);
+
+    const links = parseLinkHeader(res.headers.get("link"));
+    const nextUrl = links["next"];
+    if (!nextUrl) break;
+
+    // nextUrl is a full URL; convert to path+query
+    const u = new URL(nextUrl);
+    urlPath = `${u.pathname}${u.search}`;
+  }
+  return all;
 }
 
 function yearWindows(fromDate: Date, toDate: Date): Array<[Date, Date]> {
@@ -104,382 +118,325 @@ function yearWindows(fromDate: Date, toDate: Date): Array<[Date, Date]> {
   const start = new Date(fromDate);
   const end = new Date(toDate);
 
-  let cur = new Date(
-    Date.UTC(start.getUTCFullYear(), start.getUTCMonth(), start.getUTCDate())
-  );
-
+  let cur = new Date(Date.UTC(start.getUTCFullYear(), start.getUTCMonth(), start.getUTCDate()));
   while (cur < end) {
-    const next = new Date(
-      Date.UTC(cur.getUTCFullYear() + 1, cur.getUTCMonth(), cur.getUTCDate())
-    );
+    const next = new Date(Date.UTC(cur.getUTCFullYear() + 1, cur.getUTCMonth(), cur.getUTCDate()));
     const wEnd = next < end ? next : end;
     windows.push([new Date(cur), new Date(wEnd)]);
     cur = next;
   }
-
   return windows;
 }
 
-async function getRepoTotals(login: string, token: string) {
+async function getViewerLogin(token: string): Promise<string> {
+  const { res, data } = await restRequest<ViewerResponse>("/user", token);
+  if (!res.ok) throw new Error("Failed to read /user from GitHub. Check token permissions.");
+  return data.login;
+}
+
+async function listAccessibleRepos(token: string, includeForks: boolean): Promise<Repo[]> {
+  // Only works reliably for the authenticated user (viewer).
+  // affiliation=owner,collaborator,organization_member gives broad access.
+  const repos = await paginateRest<any>(
+    "/user/repos?per_page=100&sort=pushed&direction=desc&affiliation=owner,collaborator,organization_member",
+    token,
+    20
+  );
+
+  return repos
+    .map((r) => ({
+      owner: r.owner.login as string,
+      name: r.name as string,
+      fullName: `${r.owner.login}/${r.name}`,
+      stars: r.stargazers_count as number,
+      forks: r.forks_count as number,
+      isFork: r.fork as boolean,
+      isPrivate: r.private as boolean,
+    }))
+    .filter((r) => (includeForks ? true : !r.isFork));
+}
+
+async function listContributedReposViaGraphQL(login: string, token: string): Promise<string[]> {
+  // Best-effort: if GraphQL permissions block this, caller will catch and ignore.
   const query = /* GraphQL */ `
     query($login: String!, $cursor: String) {
       user(login: $login) {
-        repositories(
+        repositoriesContributedTo(
           first: 100
           after: $cursor
-          ownerAffiliations: OWNER
-          isFork: false
-          orderBy: { field: PUSHED_AT, direction: DESC }
+          includeUserRepositories: true
+          contributionTypes: [COMMIT, ISSUE, PULL_REQUEST, PULL_REQUEST_REVIEW]
         ) {
-          nodes {
-            nameWithOwner
-            stargazerCount
-            forkCount
-            isFork
-          }
-          pageInfo {
-            hasNextPage
-            endCursor
-          }
+          nodes { nameWithOwner }
+          pageInfo { hasNextPage endCursor }
         }
       }
     }
   `;
 
   let cursor: string | null = null;
-  let stars = 0;
-  let forks = 0;
-  const repos: RepoNode[] = [];
+  const names: string[] = [];
 
   while (true) {
-    const data: RepoTotalsResponse = await graphqlRequest(
-      query,
-      { login, cursor },
-      token
-    );
-
-    const r = data.user.repositories;
-
-    for (const repo of r.nodes) {
-      stars += repo.stargazerCount;
-      forks += repo.forkCount;
-      repos.push(repo);
-    }
-
-    if (!r.pageInfo.hasNextPage) break;
-    cursor = r.pageInfo.endCursor;
+    const data = await graphqlRequest<ReposContributedToResponse>(query, { login, cursor }, token);
+    for (const n of data.user.repositoriesContributedTo.nodes) names.push(n.nameWithOwner);
+    if (!data.user.repositoriesContributedTo.pageInfo.hasNextPage) break;
+    cursor = data.user.repositoriesContributedTo.pageInfo.endCursor;
   }
 
-  return { stars, forks, repos };
+  return names;
 }
 
-async function getReposContributedToCount(login: string, token: string) {
-  const query = /* GraphQL */ `
-    query($login: String!) {
-      user(login: $login) {
-        repositoriesContributedTo(
-          contributionTypes: [COMMIT, ISSUE, PULL_REQUEST, PULL_REQUEST_REVIEW]
-          includeUserRepositories: true
-        ) {
-          totalCount
+async function getAllTimeContributions(login: string, token: string): Promise<number | null> {
+  // Best-effort (GraphQL can be blocked by PAT settings). If blocked, return null.
+  try {
+    const createdAtQ = /* GraphQL */ `
+      query($login: String!) { user(login: $login) { createdAt } }
+    `;
+    const created = await graphqlRequest<CreatedAtResponse>(createdAtQ, { login }, token);
+    const createdAt = new Date(created.user.createdAt);
+    const now = new Date();
+    const windows = yearWindows(createdAt, now);
+
+    const contribQ = /* GraphQL */ `
+      query($login: String!, $from: DateTime!, $to: DateTime!) {
+        user(login: $login) {
+          contributionsCollection(from: $from, to: $to) {
+            contributionCalendar { totalContributions }
+          }
         }
       }
-    }
-  `;
+    `;
 
-  const data: ReposContributedToResponse = await graphqlRequest(
-    query,
-    { login },
+    let total = 0;
+    for (const [from, to] of windows) {
+      const data = await graphqlRequest<YearContribResponse>(
+        contribQ,
+        { login, from: from.toISOString(), to: to.toISOString() },
+        token
+      );
+      total += data.user.contributionsCollection.contributionCalendar.totalContributions ?? 0;
+    }
+    return total;
+  } catch {
+    return null;
+  }
+}
+
+async function getRepoViews14Days(fullName: string, token: string): Promise<number | null> {
+  // Requires repo admin permissions; if it fails, return null.
+  try {
+    const [owner, name] = fullName.split("/");
+    const { res, data } = await restRequest<{ count: number }>(
+      `/repos/${owner}/${name}/traffic/views`,
+      token
+    );
+    if (!res.ok) return null;
+    return typeof data.count === "number" ? data.count : null;
+  } catch {
+    return null;
+  }
+}
+
+async function getContributorStatsForRepo(
+  fullName: string,
+  token: string
+): Promise<{ status: "ok"; stats: ContributorStat[] } | { status: "pending" } | { status: "failed" }> {
+  const [owner, name] = fullName.split("/");
+  const { res, data } = await restRequest<ContributorStat[]>(
+    `/repos/${owner}/${name}/stats/contributors`,
     token
   );
 
-  return data.user.repositoriesContributedTo.totalCount ?? 0;
+  if (res.status === 202) return { status: "pending" };
+  if (!res.ok) return { status: "failed" };
+  if (!Array.isArray(data)) return { status: "failed" };
+  return { status: "ok", stats: data };
 }
 
-async function getAccountCreatedAt(login: string, token: string) {
-  const query = /* GraphQL */ `
-    query($login: String!) {
-      user(login: $login) {
-        createdAt
-      }
-    }
-  `;
+async function mapWithConcurrency<T, R>(
+  items: T[],
+  limit: number,
+  fn: (item: T) => Promise<R>
+): Promise<R[]> {
+  const results: R[] = new Array(items.length);
+  let idx = 0;
 
-  const data: UserCreatedAtResponse = await graphqlRequest(query, { login }, token);
-  return new Date(data.user.createdAt);
-}
-
-async function getAllTimeContributions(login: string, token: string) {
-  const createdAt = await getAccountCreatedAt(login, token);
-  const now = new Date();
-  const windows = yearWindows(createdAt, now);
-
-  const contribQuery = /* GraphQL */ `
-    query($login: String!, $from: DateTime!, $to: DateTime!) {
-      user(login: $login) {
-        contributionsCollection(from: $from, to: $to) {
-          contributionCalendar {
-            totalContributions
-          }
-        }
-      }
-    }
-  `;
-
-  let total = 0;
-
-  for (const [from, to] of windows) {
-    const data: YearContribResponse = await graphqlRequest(
-      contribQuery,
-      { login, from: from.toISOString(), to: to.toISOString() },
-      token
-    );
-
-    total +=
-      data.user.contributionsCollection.contributionCalendar.totalContributions ??
-      0;
-  }
-
-  return total;
-}
-
-async function getMergedPrLocChanged(login: string, token: string, maxPrs: number) {
-  const query = /* GraphQL */ `
-    query($login: String!, $cursor: String) {
-      user(login: $login) {
-        pullRequests(
-          first: 100
-          after: $cursor
-          states: [MERGED]
-          orderBy: { field: CREATED_AT, direction: DESC }
-        ) {
-          nodes {
-            additions
-            deletions
-          }
-          pageInfo {
-            hasNextPage
-            endCursor
-          }
-        }
-      }
-    }
-  `;
-
-  let cursor: string | null = null;
-  let scanned = 0;
-  let loc = 0;
-
-  while (true) {
-    const data: MergedPrsResponse = await graphqlRequest(
-      query,
-      { login, cursor },
-      token
-    );
-
-    const prs = data.user.pullRequests;
-
-    for (const pr of prs.nodes) {
-      loc += (pr.additions ?? 0) + (pr.deletions ?? 0);
-      scanned += 1;
-      if (scanned >= maxPrs) return { loc, scanned };
-    }
-
-    if (!prs.pageInfo.hasNextPage) break;
-    cursor = prs.pageInfo.endCursor;
-  }
-
-  return { loc, scanned };
-}
-
-async function getUserNodeId(login: string, token: string) {
-  const q = /* GraphQL */ `
-    query($login: String!) {
-      user(login: $login) { id }
-    }
-  `;
-
-  const data: UserIdResponse = await graphqlRequest(q, { login }, token);
-  return data.user.id;
-}
-
-async function getCommitLocChangedFromDefaultBranches(
-  login: string,
-  token: string,
-  repos: { nameWithOwner: string }[],
-  opts: { reposLimit: number; maxCommitsPerRepo: number }
-) {
-  const userId = await getUserNodeId(login, token);
-
-  const q = /* GraphQL */ `
-    query($owner: String!, $name: String!, $userId: ID!, $cursor: String) {
-      repository(owner: $owner, name: $name) {
-        defaultBranchRef {
-          target {
-            ... on Commit {
-              history(first: 100, after: $cursor, author: { id: $userId }) {
-                nodes { additions deletions }
-                pageInfo { hasNextPage endCursor }
-              }
-            }
-          }
-        }
-      }
-    }
-  `;
-
-  let loc = 0;
-  let commitsCounted = 0;
-  let reposScanned = 0;
-
-  const slice = repos.slice(0, Math.min(opts.reposLimit, repos.length));
-
-  for (const r of slice) {
-    const [owner, name] = r.nameWithOwner.split("/");
-    reposScanned += 1;
-
-    let cursor: string | null = null;
-    let perRepoCount = 0;
-
+  async function worker() {
     while (true) {
-      const data: RepoCommitHistoryResponse = await graphqlRequest(
-        q,
-        { owner, name, userId, cursor },
-        token
-      );
-
-      const history = data.repository?.defaultBranchRef?.target?.history;
-      if (!history) break;
-
-      for (const c of history.nodes) {
-        loc += (c.additions ?? 0) + (c.deletions ?? 0);
-        commitsCounted += 1;
-        perRepoCount += 1;
-        if (perRepoCount >= opts.maxCommitsPerRepo) break;
-      }
-
-      if (perRepoCount >= opts.maxCommitsPerRepo) break;
-      if (!history.pageInfo.hasNextPage) break;
-
-      cursor = history.pageInfo.endCursor;
+      const cur = idx++;
+      if (cur >= items.length) return;
+      results[cur] = await fn(items[cur]);
     }
   }
 
-  return { loc, commitsCounted, reposScanned };
-}
-
-async function getRepoViews14Days(repos: RepoNode[], token: string, reposLimit: number) {
-  let totalViews = 0;
-  let attempted = 0;
-  let succeeded = 0;
-
-  const slice = repos.slice(0, Math.min(reposLimit, repos.length));
-
-  for (const r of slice) {
-    attempted += 1;
-    try {
-      const [owner, name] = r.nameWithOwner.split("/");
-      const res = await fetch(
-        `${GITHUB_REST}/repos/${owner}/${name}/traffic/views`,
-        {
-          headers: {
-            accept: "application/vnd.github+json",
-            authorization: `bearer ${token}`,
-            "x-github-api-version": "2022-11-28",
-          },
-        }
-      );
-
-      if (!res.ok) continue;
-      const json: any = await res.json();
-
-      if (typeof json.count === "number") {
-        totalViews += json.count;
-        succeeded += 1;
-      }
-    } catch {
-      // ignore per-repo failure
-    }
-  }
-
-  return { totalViews, attempted, succeeded };
+  const workers = Array.from({ length: Math.min(limit, items.length) }, () => worker());
+  await Promise.all(workers);
+  return results;
 }
 
 export type GitHubStatistics = {
   login: string;
+
   stars: number;
   forks: number;
-  contributionsAllTime: number;
 
+  contributionsAllTime: number | null;
+
+  // LOC across all your commits (additions+deletions) in scanned repos
   locChanged: number;
-  locItemsCounted: number;
-  locSource: "prs" | "commits";
+  commitsCounted: number;
 
-  reposContributedTo: number;
-  views14d: null | { totalViews: number; attempted: number; succeeded: number };
+  reposScanned: number;
+  reposMatched: number;   // repos where you appear in contributor stats
+  reposPending: number;   // 202 computing
+  reposFailed: number;    // non-ok
+
+  reposWithContributions: number; // same as reposMatched (kept for display)
+  views14d: number | null;        // optional sum across repos (we keep single value or null)
 };
 
 export async function getGitHubStatistics(
-  login: string,
+  username: string,
   options?: {
-    includeTraffic?: boolean;
     reposLimit?: number;
-
-    maxPrs?: number;
-
-    locSource?: "prs" | "commits";
-    maxCommitsPerRepo?: number;
+    includeForks?: boolean;
+    includeContributedRepos?: boolean; // adds reposContributedTo list (best-effort)
+    includeTraffic?: boolean;          // traffic/views (best-effort)
+    concurrency?: number;              // contributor stats concurrency
   }
 ): Promise<GitHubStatistics> {
   const token = process.env.GITHUB_TOKEN;
   if (!token) throw new Error("Missing GITHUB_TOKEN env var");
 
+  const reposLimit = options?.reposLimit ?? 50;
+  const includeForks = options?.includeForks ?? false;
+  const includeContributedRepos = options?.includeContributedRepos ?? true;
   const includeTraffic = options?.includeTraffic ?? false;
-  const reposLimit = options?.reposLimit ?? 25;
+  const concurrency = options?.concurrency ?? 4;
 
-  const locSource = options?.locSource ?? "prs";
-  const maxPrs = options?.maxPrs ?? 400;
-  const maxCommitsPerRepo = options?.maxCommitsPerRepo ?? 200;
+  const viewer = await getViewerLogin(token);
 
-  const [{ stars, forks, repos }, reposContributedTo, contributionsAllTime] =
-    await Promise.all([
-      getRepoTotals(login, token),
-      getReposContributedToCount(login, token),
-      getAllTimeContributions(login, token),
-    ]);
-
-  let locChanged = 0;
-  let locItemsCounted = 0;
-
-  if (locSource === "commits") {
-    const commitLoc = await getCommitLocChangedFromDefaultBranches(
-      login,
-      token,
-      repos,
-      { reposLimit, maxCommitsPerRepo }
+  // For "all my changes" we expect token owner == username.
+  // If not, we can still do partial public-only stats but it won’t be complete.
+  if (viewer.toLowerCase() !== username.toLowerCase()) {
+    throw new Error(
+      `Token owner (${viewer}) does not match username (${username}). Use a token created from the same account as the username.`
     );
-    locChanged = commitLoc.loc;
-    locItemsCounted = commitLoc.commitsCounted;
-  } else {
-    const prLoc = await getMergedPrLocChanged(login, token, maxPrs);
-    locChanged = prLoc.loc;
-    locItemsCounted = prLoc.scanned;
   }
 
-  let views14d: GitHubStatistics["views14d"] = null;
+  const accessible = await listAccessibleRepos(token, includeForks);
+
+  // Merge in contributed repos (GraphQL) if enabled + available
+  const repoSet = new Map<string, Repo>();
+  for (const r of accessible) repoSet.set(r.fullName.toLowerCase(), r);
+
+  if (includeContributedRepos) {
+    try {
+      const contributed = await listContributedReposViaGraphQL(username, token);
+      for (const fullName of contributed) {
+        const key = fullName.toLowerCase();
+        if (!repoSet.has(key)) {
+          // We don’t know stars/forks/private for these without extra REST calls;
+          // but for LOC we only need fullName.
+          const [owner, name] = fullName.split("/");
+          repoSet.set(key, {
+            owner,
+            name,
+            fullName,
+            stars: 0,
+            forks: 0,
+            isFork: false,
+            isPrivate: false,
+          });
+        }
+      }
+    } catch {
+      // ignore: GraphQL may be blocked by PAT; LOC still works for accessible repos.
+    }
+  }
+
+  // Prefer scanning most relevant repos first (those with known metadata / recently pushed)
+  const reposAll = Array.from(repoSet.values()).slice(0, reposLimit);
+
+  // Stars/Forks only meaningful for repos we actually fetched from /user/repos
+  let totalStars = 0;
+  let totalForks = 0;
+  for (const r of reposAll) {
+    totalStars += r.stars ?? 0;
+    totalForks += r.forks ?? 0;
+  }
+
+  // Contributions all-time (best-effort)
+  const contributionsAllTime = await getAllTimeContributions(username, token);
+
+  // LOC: sum contributor stats across repos
+  const targetLogin = username.toLowerCase();
+
+  let locChanged = 0;
+  let commitsCounted = 0;
+
+  let reposMatched = 0;
+  let reposPending = 0;
+  let reposFailed = 0;
+
+  const contribResults = await mapWithConcurrency(reposAll, concurrency, async (r) => {
+    const res = await getContributorStatsForRepo(r.fullName, token);
+    return { repo: r.fullName, res };
+  });
+
+  for (const item of contribResults) {
+    const r = item.res;
+    if (r.status === "pending") {
+      reposPending += 1;
+      continue;
+    }
+    if (r.status === "failed") {
+      reposFailed += 1;
+      continue;
+    }
+
+    const me = r.stats.find((x) => x.author?.login?.toLowerCase() === targetLogin);
+    if (!me) continue;
+
+    reposMatched += 1;
+    commitsCounted += me.total ?? 0;
+
+    for (const w of me.weeks ?? []) {
+      locChanged += (w.a ?? 0) + (w.d ?? 0);
+    }
+  }
+
+  // Traffic (best-effort): sum views across scanned repos
+  let views14d: number | null = null;
   if (includeTraffic) {
-    views14d = await getRepoViews14Days(repos, token, reposLimit);
+    let sum = 0;
+    let any = false;
+    for (const r of reposAll) {
+      const v = await getRepoViews14Days(r.fullName, token);
+      if (typeof v === "number") {
+        sum += v;
+        any = true;
+      }
+    }
+    views14d = any ? sum : null;
   }
 
   return {
-    login,
-    stars,
-    forks,
+    login: username,
+    stars: totalStars,
+    forks: totalForks,
     contributionsAllTime,
+
     locChanged,
-    locItemsCounted,
-    locSource,
-    reposContributedTo,
+    commitsCounted,
+
+    reposScanned: reposAll.length,
+    reposMatched,
+    reposPending,
+    reposFailed,
+
+    reposWithContributions: reposMatched,
     views14d,
   };
 }
