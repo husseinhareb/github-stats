@@ -2,11 +2,20 @@ import { NextResponse } from "next/server";
 import { getGitHubStatistics } from "@/lib/github";
 import { renderStatisticsCard } from "@/lib/renderCard";
 
-// Ensure Node runtime (traffic + longer work is safer here)
 export const runtime = "nodejs";
 
 function getParam(url: URL, key: string, fallback?: string) {
   return url.searchParams.get(key) ?? fallback ?? null;
+}
+
+function toBool(v: string | null, fallback = false) {
+  if (v === null) return fallback;
+  return v === "true" || v === "1" || v.toLowerCase() === "yes";
+}
+
+function toNum(v: string | null, fallback: number) {
+  const n = Number(v);
+  return Number.isFinite(n) && n > 0 ? n : fallback;
 }
 
 export async function GET(req: Request) {
@@ -14,16 +23,28 @@ export async function GET(req: Request) {
     const url = new URL(req.url);
 
     const username = getParam(url, "username");
-    if (!username) {
-      return new NextResponse("Missing ?username=", { status: 400 });
-    }
+    if (!username) return new NextResponse("Missing ?username=", { status: 400 });
 
-    const includeTraffic = getParam(url, "include_traffic", "false") === "true";
-    const reposLimit = Number(getParam(url, "repos_limit", "25")) || 25;
-    const maxPrs = Number(getParam(url, "max_prs", "400")) || 400;
+    // If raw=true -> ALWAYS return svg (useful for embeds)
+    const raw = toBool(getParam(url, "raw", "false"));
 
-    // styling params (optional)
-    const hideBorder = getParam(url, "hide_border", "false") === "true";
+    const accept = req.headers.get("accept") || "";
+    const wantsHtml = accept.includes("text/html") && !raw;
+
+    // features
+    const includeTraffic = toBool(getParam(url, "include_traffic", "false"));
+    const reposLimit = toNum(getParam(url, "repos_limit", "25"), 25);
+    const maxPrs = toNum(getParam(url, "max_prs", "400"), 400);
+    const maxCommitsPerRepo = toNum(getParam(url, "max_commits_per_repo", "200"), 200);
+
+    const locSourceParam = (getParam(url, "loc_source", "prs") ?? "prs").toLowerCase();
+    const locSource = (locSourceParam === "commits" ? "commits" : "prs") as "prs" | "commits";
+
+    // style
+    const hideBorder = toBool(getParam(url, "hide_border", "false"));
+    const width = toNum(getParam(url, "width", "560"), 560);
+
+    // colors (URL-encode # as %23)
     const bg = getParam(url, "bg", "#0d1117")!;
     const border = getParam(url, "border", "#30363d")!;
     const title = getParam(url, "title", "#58a6ff")!;
@@ -31,10 +52,43 @@ export async function GET(req: Request) {
     const value = getParam(url, "value", "#c9d1d9")!;
     const muted = getParam(url, "muted", "#8b949e")!;
 
+    // If the user opens the API route in a browser, return an HTML preview wrapper
+    if (wantsHtml) {
+      // Build a raw SVG URL for the <img>
+      const imgUrl = new URL(req.url);
+      imgUrl.searchParams.set("raw", "true");
+
+      const html = `<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>${username}'s GitHub Stats</title>
+  <style>
+    body { margin:0; min-height:100vh; display:grid; place-items:center; background:#0d1117; }
+    img { max-width: 95vw; height:auto; }
+  </style>
+</head>
+<body>
+  <img src="${imgUrl.toString()}" alt="GitHub Stats" />
+</body>
+</html>`;
+
+      return new NextResponse(html, {
+        headers: {
+          "Content-Type": "text/html; charset=utf-8",
+          "Cache-Control": "no-store",
+        },
+      });
+    }
+
+    // Otherwise return the SVG (for GitHub README embeds etc.)
     const stats = await getGitHubStatistics(username, {
       includeTraffic,
       reposLimit,
       maxPrs,
+      locSource,
+      maxCommitsPerRepo,
     });
 
     const svg = renderStatisticsCard(stats, {
@@ -45,14 +99,13 @@ export async function GET(req: Request) {
       value,
       muted,
       hideBorder,
+      width,
     });
 
     return new NextResponse(svg, {
       headers: {
         "Content-Type": "image/svg+xml; charset=utf-8",
-        // Cache at Vercel edge; GitHub also caches images, so keep it stable.
-        "Cache-Control":
-          "public, max-age=0, s-maxage=21600, stale-while-revalidate=21600",
+        "Cache-Control": "public, max-age=0, s-maxage=21600, stale-while-revalidate=21600",
       },
     });
   } catch (e: any) {
