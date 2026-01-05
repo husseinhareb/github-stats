@@ -29,10 +29,9 @@ export async function GET(req: Request) {
     const accept = req.headers.get("accept") || "";
     const wantsHtml = accept.includes("text/html") && !raw;
 
+    // LOC scan options
     const reposLimit = toNum(getParam(url, "repos_limit", "50"), 50);
     const includeForks = toBool(getParam(url, "include_forks", "false"));
-    const includeContributedRepos = toBool(getParam(url, "include_contributed", "true"));
-    const includeTraffic = toBool(getParam(url, "include_traffic", "false"));
     const concurrency = toNum(getParam(url, "concurrency", "4"), 4);
 
     // style
@@ -74,8 +73,6 @@ export async function GET(req: Request) {
     const stats = await getGitHubStatistics(username, {
       reposLimit,
       includeForks,
-      includeContributedRepos,
-      includeTraffic,
       concurrency,
     });
 

@@ -47,12 +47,20 @@ export function renderStatisticsCard(
   const contribVal =
     stats.contributionsAllTime === null ? "—" : formatNumber(stats.contributionsAllTime);
 
+  // ✅ NEW: repo with contributions is now consistent with LOC scan
+  // (it equals reposMatched in lib/github.ts)
+  const reposWithContribVal = formatNumber(stats.reposWithContributions);
+
   const locNotes: string[] = [];
   locNotes.push(
     `from ${formatNumber(stats.commitsCounted)} commits across ${stats.reposMatched}/${stats.reposScanned} repos`
   );
-  if (stats.reposPending > 0) locNotes.push(`${stats.reposPending} repos pending stats (GitHub computing)`);
-  if (stats.reposFailed > 0) locNotes.push(`${stats.reposFailed} repos failed to read`);
+  if (stats.reposPending > 0) {
+    locNotes.push(`${stats.reposPending} repos pending stats (GitHub computing)`);
+  }
+  if (stats.reposFailed > 0) {
+    locNotes.push(`${stats.reposFailed} repos failed to read`);
+  }
 
   const rows: Array<{ icon: string; name: string; val: string; note?: string | null }> = [
     { icon: "☆", name: "Stars", val: formatNumber(stats.stars) },
@@ -64,13 +72,7 @@ export function renderStatisticsCard(
       val: formatNumber(stats.locChanged),
       note: locNotes.join("\n"),
     },
-    {
-      icon: "◔",
-      name: "Repository views (past two weeks)",
-      val: stats.views14d === null ? "—" : formatNumber(stats.views14d),
-      note: stats.views14d === null ? "enable include_traffic=true" : null,
-    },
-    { icon: "▣", name: "Repositories with contributions", val: formatNumber(stats.reposWithContributions) },
+    { icon: "▣", name: "Repositories with contributions", val: reposWithContribVal },
   ];
 
   // Layout
@@ -93,8 +95,14 @@ export function renderStatisticsCard(
   let y = 72;
   const parts: string[] = [];
 
-  for (const r of rows) {
-    parts.push(`
+  for (let i = 0; i < rows.length; i++) {
+    const r = rows[i];
+
+    // animate each row with staggered delays
+    const cls = `row r${i + 1}`;
+    const rowLines: string[] = [];
+
+    rowLines.push(`
       <text x="${iconX}" y="${y}" font-size="${rowFont}" fill="${muted}"
             font-family="${fontSans}" dominant-baseline="middle">${esc(r.icon)}</text>
       <text x="${labelX}" y="${y}" font-size="${rowFont}" fill="${label}"
@@ -103,22 +111,52 @@ export function renderStatisticsCard(
             font-family="${fontMono}" dominant-baseline="middle">${esc(r.val)}</text>
     `);
 
-    const lines = r.note ? String(r.note).split("\n") : [];
-    if (lines.length) {
-      for (let i = 0; i < lines.length; i++) {
-        parts.push(`
-          <text x="${labelX}" y="${y + noteGap + i * (noteFont + 4)}"
+    const noteLines = r.note ? String(r.note).split("\n") : [];
+    if (noteLines.length) {
+      for (let j = 0; j < noteLines.length; j++) {
+        rowLines.push(`
+          <text x="${labelX}" y="${y + noteGap + j * (noteFont + 4)}"
                 font-size="${noteFont}" fill="${muted}"
-                font-family="${fontSans}" dominant-baseline="middle">${esc(lines[i])}</text>
+                font-family="${fontSans}" dominant-baseline="middle">${esc(noteLines[j])}</text>
         `);
       }
-      y += rowGap + noteGap + (lines.length - 1) * (noteFont + 4) + extraAfterNote;
+
+      parts.push(`<g class="${cls}">${rowLines.join("\n")}</g>`);
+      y += rowGap + noteGap + (noteLines.length - 1) * (noteFont + 4) + extraAfterNote;
     } else {
+      parts.push(`<g class="${cls}">${rowLines.join("\n")}</g>`);
       y += rowGap;
     }
   }
 
   const height = y + 24;
+
+  const style = `
+  <![CDATA[
+    @keyframes slideRightIn {
+      from { opacity: 0; transform: translateX(-18px); }
+      to   { opacity: 1; transform: translateX(0px); }
+    }
+
+    .row {
+      opacity: 0;
+      transform: translateX(-18px);
+      transform-box: fill-box;
+      transform-origin: center;
+      animation: slideRightIn 600ms ease-out forwards;
+    }
+
+    .r1 { animation-delay: 0ms; }
+    .r2 { animation-delay: 60ms; }
+    .r3 { animation-delay: 120ms; }
+    .r4 { animation-delay: 180ms; }
+    .r5 { animation-delay: 240ms; }
+
+    @media (prefers-reduced-motion: reduce) {
+      .row { animation: none; opacity: 1; transform: none; }
+    }
+  ]]>
+  `;
 
   return `<?xml version="1.0" encoding="UTF-8"?>
 <svg width="${width}" height="${height}" viewBox="0 0 ${width} ${height}"
@@ -128,6 +166,8 @@ export function renderStatisticsCard(
       <feDropShadow dx="0" dy="2" stdDeviation="6" flood-color="#000" flood-opacity="0.35"/>
     </filter>
   </defs>
+
+  <style type="text/css">${style}</style>
 
   <rect x="${padOuter}" y="${padOuter}"
         width="${width - padOuter * 2}" height="${height - padOuter * 2}"
