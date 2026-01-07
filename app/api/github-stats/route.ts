@@ -29,10 +29,10 @@ export async function GET(req: Request) {
     const accept = req.headers.get("accept") || "";
     const wantsHtml = accept.includes("text/html") && !raw;
 
-    // LOC scan options
-    const reposLimit = toNum(getParam(url, "repos_limit", "50"), 50);
+    // LOC scan options - optimized defaults
+    const reposLimit = toNum(getParam(url, "repos_limit", "30"), 30); // Reduced default for faster response
     const includeForks = toBool(getParam(url, "include_forks", "false"));
-    const concurrency = toNum(getParam(url, "concurrency", "4"), 4);
+    const concurrency = toNum(getParam(url, "concurrency", "10"), 10); // Higher concurrency
 
     // style
     const hideBorder = toBool(getParam(url, "hide_border", "false"));
@@ -90,7 +90,10 @@ export async function GET(req: Request) {
     return new NextResponse(svg, {
       headers: {
         "Content-Type": "image/svg+xml; charset=utf-8",
-        "Cache-Control": "public, max-age=0, s-maxage=21600, stale-while-revalidate=21600",
+        // Aggressive caching: 1 hour browser cache, 6 hours CDN cache
+        "Cache-Control": "public, max-age=3600, s-maxage=21600, stale-while-revalidate=43200",
+        // Enable browser caching with ETag
+        "ETag": `"${Buffer.from(svg).length}-${Date.now()}"`,
       },
     });
   } catch (e: any) {
