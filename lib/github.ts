@@ -1,6 +1,30 @@
 const GITHUB_GRAPHQL = "https://api.github.com/graphql";
 const GITHUB_REST = "https://api.github.com";
 
+// === In-memory cache with TTL ===
+interface CacheEntry<T> {
+  data: T;
+  expiry: number;
+}
+
+const cache = new Map<string, CacheEntry<unknown>>();
+const CACHE_TTL = 6 * 60 * 60 * 1000; // 6 hours
+const SHORT_CACHE_TTL = 5 * 60 * 1000; // 5 minutes for pending repos
+
+function getCached<T>(key: string): T | null {
+  const entry = cache.get(key);
+  if (!entry) return null;
+  if (Date.now() > entry.expiry) {
+    cache.delete(key);
+    return null;
+  }
+  return entry.data as T;
+}
+
+function setCache<T>(key: string, data: T, ttl = CACHE_TTL): void {
+  cache.set(key, { data, expiry: Date.now() + ttl });
+}
+
 type RepoRest = {
   full_name: string;
   fork: boolean;
@@ -113,6 +137,23 @@ async function sleep(ms: number) {
   return new Promise((r) => setTimeout(r, ms));
 }
 
+// Pre-warm cache for contributor stats (fire-and-forget)
+async function prewarmContributorStats(repos: string[], token: string, concurrency: number): Promise<void> {
+  // Fire requests to trigger GitHub's computation without waiting
+  await mapWithConcurrency(repos.slice(0, Math.min(repos.length, 20)), concurrency * 2, async (fullName) => {
+    const [owner, name] = fullName.split("/");
+    try {
+      await fetch(`${GITHUB_REST}/repos/${owner}/${name}/stats/contributors`, {
+        headers: {
+          accept: "application/vnd.github+json",
+          authorization: `bearer ${token}`,
+          "x-github-api-version": "2022-11-28",
+        },
+      });
+    } catch {}
+  });
+}
+
 async function getViewerLogin(token: string): Promise<string> {
   const { res, data } = await restRequest<ViewerResponse>("/user", token);
   if (!res.ok) throw new Error("Failed to read /user from GitHub. Check token permissions.");
@@ -151,6 +192,11 @@ async function listAccessibleReposForScan(token: string, includeForks: boolean) 
 }
 
 async function getAllTimeContributions(login: string, token: string): Promise<number | null> {
+  // Check cache
+  const cacheKey = `contrib-all:${login.toLowerCase()}`;
+  const cached = getCached<number>(cacheKey);
+  if (cached !== null) return cached;
+
   try {
     const createdAtQ = /* GraphQL */ `
       query($login: String!) { user(login: $login) { createdAt } }
@@ -158,6 +204,9 @@ async function getAllTimeContributions(login: string, token: string): Promise<nu
     const created = await graphqlRequest<CreatedAtResponse>(createdAtQ, { login }, token);
     const createdAt = new Date(created.user.createdAt);
 
+    const windows = yearWindows(createdAt, new Date());
+    
+    // Batch all year queries in parallel (much faster than sequential)
     const contribQ = /* GraphQL */ `
       query($login: String!, $from: DateTime!, $to: DateTime!) {
         user(login: $login) {
@@ -168,18 +217,24 @@ async function getAllTimeContributions(login: string, token: string): Promise<nu
       }
     `;
 
-    const windows = yearWindows(createdAt, new Date());
-    let total = 0;
+    const results = await Promise.all(
+      windows.map(([from, to]) =>
+        graphqlRequest<YearContribResponse>(
+          contribQ,
+          { login, from: from.toISOString(), to: to.toISOString() },
+          token
+        ).catch(() => null)
+      )
+    );
 
-    for (const [from, to] of windows) {
-      const d = await graphqlRequest<YearContribResponse>(
-        contribQ,
-        { login, from: from.toISOString(), to: to.toISOString() },
-        token
-      );
-      total += d.user.contributionsCollection.contributionCalendar.totalContributions ?? 0;
+    let total = 0;
+    for (const d of results) {
+      if (d) {
+        total += d.user.contributionsCollection.contributionCalendar.totalContributions ?? 0;
+      }
     }
 
+    setCache(cacheKey, total, CACHE_TTL);
     return total;
   } catch {
     return null;
@@ -190,11 +245,16 @@ async function getContributorStatsForRepo(
   fullName: string,
   token: string
 ): Promise<{ status: "ok"; stats: ContributorStat[] } | { status: "pending" } | { status: "failed" }> {
+  // Check cache first
+  const cacheKey = `contrib:${fullName}`;
+  const cached = getCached<{ status: "ok"; stats: ContributorStat[] } | { status: "pending" } | { status: "failed" }>(cacheKey);
+  if (cached) return cached;
+
   const [owner, name] = fullName.split("/");
 
-  // Retry because 202 is common (GitHub computing stats)
-  const retries = 4;
-  const delays = [300, 600, 1200, 2000];
+  // Reduced retries: 2 attempts with shorter delays (max ~500ms)
+  const retries = 2;
+  const delays = [100, 250];
 
   for (let attempt = 0; attempt <= retries; attempt++) {
     const { res, data } = await restRequest<ContributorStat[]>(
@@ -203,17 +263,34 @@ async function getContributorStatsForRepo(
     );
 
     if (res.status === 202) {
-      if (attempt === retries) return { status: "pending" };
+      if (attempt === retries) {
+        const result = { status: "pending" as const };
+        setCache(cacheKey, result, SHORT_CACHE_TTL);
+        return result;
+      }
       await sleep(delays[Math.min(attempt, delays.length - 1)]);
       continue;
     }
 
-    if (!res.ok) return { status: "failed" };
-    if (!Array.isArray(data)) return { status: "failed" };
-    return { status: "ok", stats: data };
+    if (!res.ok) {
+      const result = { status: "failed" as const };
+      setCache(cacheKey, result, SHORT_CACHE_TTL);
+      return result;
+    }
+    if (!Array.isArray(data)) {
+      const result = { status: "failed" as const };
+      setCache(cacheKey, result, SHORT_CACHE_TTL);
+      return result;
+    }
+    
+    const result = { status: "ok" as const, stats: data };
+    setCache(cacheKey, result, CACHE_TTL);
+    return result;
   }
 
-  return { status: "pending" };
+  const result = { status: "pending" as const };
+  setCache(cacheKey, result, SHORT_CACHE_TTL);
+  return result;
 }
 
 async function mapWithConcurrency<T, R>(
@@ -270,7 +347,13 @@ export async function getGitHubStatistics(
 
   const reposLimit = options?.reposLimit ?? 50;
   const includeForks = options?.includeForks ?? false;
-  const concurrency = options?.concurrency ?? 4;
+  // Increased default concurrency for better performance
+  const concurrency = Math.max(options?.concurrency ?? 8, 4);
+
+  // Check full stats cache first
+  const statsCacheKey = `stats:${username.toLowerCase()}:${reposLimit}:${includeForks}`;
+  const cachedStats = getCached<GitHubStatistics>(statsCacheKey);
+  if (cachedStats) return cachedStats;
 
   const viewer = await getViewerLogin(token);
   if (viewer.toLowerCase() !== username.toLowerCase()) {
@@ -279,11 +362,18 @@ export async function getGitHubStatistics(
     );
   }
 
-  const { stars, forks } = await getOwnedRepoTotals(token);
-  const contributionsAllTime = await getAllTimeContributions(username, token);
+  // Run all independent fetches in parallel for maximum speed
+  const [repoTotals, contributionsAllTime, allRepos] = await Promise.all([
+    getOwnedRepoTotals(token),
+    getAllTimeContributions(username, token),
+    listAccessibleReposForScan(token, includeForks),
+  ]);
 
-  const allRepos = await listAccessibleReposForScan(token, includeForks);
+  const { stars, forks } = repoTotals;
   const reposToScan = allRepos.slice(0, Math.max(0, reposLimit));
+
+  // Pre-warm contributor stats (fire-and-forget to trigger GitHub computation)
+  prewarmContributorStats(reposToScan, token, concurrency).catch(() => {});
 
   const target = username.toLowerCase();
 
@@ -294,6 +384,7 @@ export async function getGitHubStatistics(
   let reposPending = 0;
   let reposFailed = 0;
 
+  // Use higher concurrency for contributor stats
   const results = await mapWithConcurrency(
     reposToScan,
     concurrency,
@@ -323,7 +414,7 @@ export async function getGitHubStatistics(
     }
   }
 
-  return {
+  const finalStats: GitHubStatistics = {
     login: username,
     stars,
     forks,
@@ -336,4 +427,14 @@ export async function getGitHubStatistics(
     reposFailed,
     reposWithContributions: reposMatched, // ✅ consistent with LOC scan
   };
+
+  // Only cache if we have good data (low pending/failed ratio)
+  const successRate = reposToScan.length > 0 
+    ? (reposMatched + reposFailed) / reposToScan.length 
+    : 1;
+  if (successRate > 0.5) {
+    setCache(statsCacheKey, finalStats, CACHE_TTL);
+  }
+
+  return finalStats;
 }
