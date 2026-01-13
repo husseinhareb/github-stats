@@ -29,21 +29,21 @@ export async function GET(req: Request) {
     const accept = req.headers.get("accept") || "";
     const wantsHtml = accept.includes("text/html") && !raw;
 
-    // LOC scan options - optimized defaults
-    const reposLimit = toNum(getParam(url, "repos_limit", "30"), 30); // Reduced default for faster response
+    // LOC scan options - fetch ALL repos with maximum speed
+    const reposLimit = toNum(getParam(url, "repos_limit", "500"), 500); // Fetch all repos
     const includeForks = toBool(getParam(url, "include_forks", "false"));
-    const concurrency = toNum(getParam(url, "concurrency", "10"), 10); // Higher concurrency
+    const concurrency = toNum(getParam(url, "concurrency", "20"), 20); // Maximum concurrency
 
     // style
     const hideBorder = toBool(getParam(url, "hide_border", "false"));
-    const width = toNum(getParam(url, "width", "560"), 560);
+    const width = toNum(getParam(url, "width", "495"), 495);
 
-    const bg = getParam(url, "bg", "#0d1117")!;
-    const border = getParam(url, "border", "#30363d")!;
-    const title = getParam(url, "title", "#58a6ff")!;
-    const label = getParam(url, "label", "#c9d1d9")!;
-    const value = getParam(url, "value", "#c9d1d9")!;
-    const muted = getParam(url, "muted", "#8b949e")!;
+    const bg = getParam(url, "bg", "#1a1b27")!;
+    const border = getParam(url, "border", "#38bdae")!;
+    const title = getParam(url, "title", "#e91e63")!;
+    const label = getParam(url, "label", "#ffffff")!;
+    const value = getParam(url, "value", "#ffffff")!;
+    const muted = getParam(url, "muted", "#9e9e9e")!;
 
     if (wantsHtml) {
       const imgUrl = new URL(req.url);

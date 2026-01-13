@@ -98,7 +98,7 @@ function parseLinkHeader(link: string | null): Record<string, string> {
   return out;
 }
 
-async function paginateRest<T>(firstPath: string, token: string, maxPages = 20): Promise<T[]> {
+async function paginateRest<T>(firstPath: string, token: string, maxPages = 100): Promise<T[]> {
   let path = firstPath;
   const out: T[] = [];
 
@@ -137,10 +137,10 @@ async function sleep(ms: number) {
   return new Promise((r) => setTimeout(r, ms));
 }
 
-// Pre-warm cache for contributor stats (fire-and-forget)
+// Pre-warm cache for contributor stats - triggers GitHub to compute stats for ALL repos
 async function prewarmContributorStats(repos: string[], token: string, concurrency: number): Promise<void> {
-  // Fire requests to trigger GitHub's computation without waiting
-  await mapWithConcurrency(repos.slice(0, Math.min(repos.length, 20)), concurrency * 2, async (fullName) => {
+  // Fire requests to trigger GitHub's computation for ALL repos
+  await mapWithConcurrency(repos, concurrency * 2, async (fullName) => {
     const [owner, name] = fullName.split("/");
     try {
       await fetch(`${GITHUB_REST}/repos/${owner}/${name}/stats/contributors`, {
@@ -152,6 +152,8 @@ async function prewarmContributorStats(repos: string[], token: string, concurren
       });
     } catch {}
   });
+  // Wait a bit for GitHub to start computing
+  await sleep(1000);
 }
 
 async function getViewerLogin(token: string): Promise<string> {
@@ -164,7 +166,7 @@ async function getOwnedRepoTotals(token: string) {
   const owned = await paginateRest<RepoRest>(
     "/user/repos?per_page=100&sort=pushed&direction=desc&affiliation=owner",
     token,
-    50
+    100
   );
 
   let stars = 0;
@@ -183,7 +185,7 @@ async function listAccessibleReposForScan(token: string, includeForks: boolean) 
   const repos = await paginateRest<RepoRest>(
     "/user/repos?per_page=100&sort=pushed&direction=desc&affiliation=owner,collaborator,organization_member",
     token,
-    50
+    100
   );
 
   return repos
@@ -252,9 +254,9 @@ async function getContributorStatsForRepo(
 
   const [owner, name] = fullName.split("/");
 
-  // Reduced retries: 2 attempts with shorter delays (max ~500ms)
-  const retries = 2;
-  const delays = [100, 250];
+  // More retries with exponential backoff - GitHub needs time to compute stats
+  const retries = 5;
+  const delays = [200, 500, 1000, 2000, 3000];
 
   for (let attempt = 0; attempt <= retries; attempt++) {
     const { res, data } = await restRequest<ContributorStat[]>(
@@ -345,10 +347,10 @@ export async function getGitHubStatistics(
   const token = process.env.GITHUB_TOKEN;
   if (!token) throw new Error("Missing GITHUB_TOKEN env var");
 
-  const reposLimit = options?.reposLimit ?? 50;
+  const reposLimit = options?.reposLimit ?? 500; // Fetch all repos by default
   const includeForks = options?.includeForks ?? false;
-  // Increased default concurrency for better performance
-  const concurrency = Math.max(options?.concurrency ?? 8, 4);
+  // Maximum concurrency for fastest fetching
+  const concurrency = Math.max(options?.concurrency ?? 20, 10);
 
   // Check full stats cache first
   const statsCacheKey = `stats:${username.toLowerCase()}:${reposLimit}:${includeForks}`;
@@ -372,8 +374,8 @@ export async function getGitHubStatistics(
   const { stars, forks } = repoTotals;
   const reposToScan = allRepos.slice(0, Math.max(0, reposLimit));
 
-  // Pre-warm contributor stats (fire-and-forget to trigger GitHub computation)
-  prewarmContributorStats(reposToScan, token, concurrency).catch(() => {});
+  // Pre-warm contributor stats - WAIT for it to trigger all repos before fetching
+  await prewarmContributorStats(reposToScan, token, concurrency);
 
   const target = username.toLowerCase();
 
