@@ -32,12 +32,12 @@ export function renderStatisticsCard(
 ) {
   const width = opts.width ?? 495;
 
-  const bg = opts.bg ?? "#1a1b27";
-  const border = opts.hideBorder ? "transparent" : (opts.border ?? "#38bdae");
-  const title = opts.title ?? "#e91e63";
-  const label = opts.label ?? "#ffffff";
-  const value = opts.value ?? "#ffffff";
-  const muted = opts.muted ?? "#9e9e9e";
+  const bg = opts.bg ?? "#282A36";
+  const border = opts.hideBorder ? "transparent" : (opts.border ?? "#E4E2E2");
+  const title = opts.title ?? "#F76B92";
+  const label = opts.label ?? "#F8F8F2";
+  const value = opts.value ?? "#F8F8F2";
+  const muted = opts.muted ?? "#77D5F5";
 
   const fontSans =
     "'Segoe UI', Ubuntu, Sans-Serif";
@@ -68,18 +68,18 @@ export function renderStatisticsCard(
     star: "M8 .25a.75.75 0 0 1 .673.418l1.882 3.815 4.21.612a.75.75 0 0 1 .416 1.279l-3.046 2.97.719 4.192a.75.75 0 0 1-1.088.791L8 12.347l-3.766 1.98a.75.75 0 0 1-1.088-.79l.72-4.194L.818 6.374a.75.75 0 0 1 .416-1.28l4.21-.611L7.327.668A.75.75 0 0 1 8 .25z",
     // fa-code-fork
     fork: "M5 3.25a.75.75 0 1 1-1.5 0 .75.75 0 0 1 1.5 0zm0 2.122a2.25 2.25 0 1 0-1.5 0v.878A2.25 2.25 0 0 0 5.75 8.5h1.5v2.128a2.251 2.251 0 1 0 1.5 0V8.5h1.5a2.25 2.25 0 0 0 2.25-2.25v-.878a2.25 2.25 0 1 0-1.5 0v.878a.75.75 0 0 1-.75.75h-4.5a.75.75 0 0 1-.75-.75v-.878zM8 12.75a.75.75 0 1 1 0 1.5.75.75 0 0 1 0-1.5zM10.5 4a.75.75 0 1 1 1.5 0 .75.75 0 0 1-1.5 0z",
-    // fa-fire (contributions)
-    fire: "M7.998 14.5c2.832 0 5-1.98 5-4.5 0-1.463-.68-2.19-1.879-3.383l-.036-.037c-1.013-1.008-2.3-2.29-2.834-4.434-.322.256-.63.579-.864.953-.432.696-.621 1.58-.046 2.73.473.947.67 2.284-.278 3.232-.61.61-1.545.84-2.403.633a2.79 2.79 0 0 1-1.436-.874A3.198 3.198 0 0 0 3 10c0 2.53 2.164 4.5 4.998 4.5zM9.533.753C9.496.34 9.16.009 8.77.146c-1.79.635-3.258 2.086-4.13 3.316-.878 1.237-1.392 2.612-1.392 3.538 0 4.153 3.288 6.5 6.75 6.5s6.75-2.347 6.75-6.5c0-2.234-1.828-4.044-3.503-5.716l-.036-.037C11.84 2.878 10.5 1.53 9.533.753z",
+    // git-commit icon (circle with lines) for contributions
+    commit: "M10.5 7.75a2.5 2.5 0 1 1-5 0 2.5 2.5 0 0 1 5 0zm1.43.75a4.002 4.002 0 0 1-7.86 0H.75a.75.75 0 0 1 0-1.5h3.32a4.002 4.002 0 0 1 7.86 0h3.32a.75.75 0 0 1 0 1.5h-3.32z",
     // fa-code (lines of code)
     code: "M4.72 3.22a.75.75 0 0 1 1.06 1.06L2.56 7.5l3.22 3.22a.75.75 0 1 1-1.06 1.06l-3.75-3.75a.75.75 0 0 1 0-1.06l3.75-3.75zm6.56 0a.75.75 0 1 0-1.06 1.06L13.44 7.5l-3.22 3.22a.75.75 0 1 0 1.06 1.06l3.75-3.75a.75.75 0 0 0 0-1.06l-3.75-3.75z",
-    // fa-folder (repositories)
-    repo: "M.75 3h6.5a.75.75 0 0 1 .53.22l.5.5h6.97a.75.75 0 0 1 .75.75v8.5a.75.75 0 0 1-.75.75H.75a.75.75 0 0 1-.75-.75V3.75A.75.75 0 0 1 .75 3zm7.47 1.72L6.94 3.44a.25.25 0 0 0-.177-.073H1.25a.25.25 0 0 0-.25.25v8.757c0 .138.112.25.25.25h13.5a.25.25 0 0 0 .25-.25V5.25a.25.25 0 0 0-.25-.25H8.397a.25.25 0 0 1-.177-.073z",
+    // octicon-repo (GitHub repository icon)
+    repo: "M2 2.5A2.5 2.5 0 0 1 4.5 0h8.75a.75.75 0 0 1 .75.75v12.5a.75.75 0 0 1-.75.75h-2.5a.75.75 0 0 1 0-1.5h1.75v-2h-8a1 1 0 0 0-.714 1.7.75.75 0 1 1-1.072 1.05A2.495 2.495 0 0 1 2 11.5Zm10.5-1h-8a1 1 0 0 0-1 1v6.708A2.486 2.486 0 0 1 4.5 9h8ZM5 12.25a.25.25 0 0 1 .25-.25h3.5a.25.25 0 0 1 .25.25v3.25a.25.25 0 0 1-.4.2l-1.45-1.087a.249.249 0 0 0-.3 0L5.4 15.7a.25.25 0 0 1-.4-.2Z",
   };
 
   const rows: Array<{ iconPath: string; name: string; val: string; note?: string | null }> = [
     { iconPath: icons.star, name: "Total Stars Earned:", val: formatNumber(stats.stars) },
     { iconPath: icons.fork, name: "Total Forks:", val: formatNumber(stats.forks) },
-    { iconPath: icons.fire, name: "All-time Contributions:", val: contribVal },
+    { iconPath: icons.commit, name: "All-time Contributions:", val: contribVal },
     {
       iconPath: icons.code,
       name: "Lines of Code Changed:",

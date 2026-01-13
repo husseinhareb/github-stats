@@ -38,12 +38,12 @@ export async function GET(req: Request) {
     const hideBorder = toBool(getParam(url, "hide_border", "false"));
     const width = toNum(getParam(url, "width", "495"), 495);
 
-    const bg = getParam(url, "bg", "#1a1b27")!;
-    const border = getParam(url, "border", "#38bdae")!;
-    const title = getParam(url, "title", "#e91e63")!;
-    const label = getParam(url, "label", "#ffffff")!;
-    const value = getParam(url, "value", "#ffffff")!;
-    const muted = getParam(url, "muted", "#9e9e9e")!;
+    const bg = getParam(url, "bg", "#282A36")!;
+    const border = getParam(url, "border", "#E4E2E2")!;
+    const title = getParam(url, "title", "#F76B92")!;
+    const label = getParam(url, "label", "#F8F8F2")!;
+    const value = getParam(url, "value", "#F8F8F2")!;
+    const muted = getParam(url, "muted", "#77D5F5")!;
 
     if (wantsHtml) {
       const imgUrl = new URL(req.url);
