@@ -295,6 +295,58 @@ async function getContributorStatsForRepo(
   return result;
 }
 
+// Longer retry variant for the second pass - gives GitHub more time to compute
+async function getContributorStatsForRepoLong(
+  fullName: string,
+  token: string
+): Promise<{ status: "ok"; stats: ContributorStat[] } | { status: "pending" } | { status: "failed" }> {
+  const cacheKey = `contrib:${fullName}`;
+  const cached = getCached<{ status: "ok"; stats: ContributorStat[] } | { status: "pending" } | { status: "failed" }>(cacheKey);
+  if (cached && cached.status !== "pending") return cached;
+
+  const [owner, name] = fullName.split("/");
+
+  // More aggressive retries with longer exponential backoff
+  const retries = 8;
+  const delays = [500, 1000, 2000, 3000, 5000, 5000, 8000, 10000];
+
+  for (let attempt = 0; attempt <= retries; attempt++) {
+    const { res, data } = await restRequest<ContributorStat[]>(
+      `/repos/${owner}/${name}/stats/contributors`,
+      token
+    );
+
+    if (res.status === 202) {
+      if (attempt === retries) {
+        const result = { status: "pending" as const };
+        setCache(cacheKey, result, SHORT_CACHE_TTL);
+        return result;
+      }
+      await sleep(delays[Math.min(attempt, delays.length - 1)]);
+      continue;
+    }
+
+    if (!res.ok) {
+      const result = { status: "failed" as const };
+      setCache(cacheKey, result, SHORT_CACHE_TTL);
+      return result;
+    }
+    if (!Array.isArray(data)) {
+      const result = { status: "failed" as const };
+      setCache(cacheKey, result, SHORT_CACHE_TTL);
+      return result;
+    }
+
+    const result = { status: "ok" as const, stats: data };
+    setCache(cacheKey, result, CACHE_TTL);
+    return result;
+  }
+
+  const result = { status: "pending" as const };
+  setCache(cacheKey, result, SHORT_CACHE_TTL);
+  return result;
+}
+
 async function mapWithConcurrency<T, R>(
   items: T[],
   limit: number,
@@ -332,8 +384,8 @@ export type GitHubStatistics = {
   reposPending: number; // 202 computing
   reposFailed: number;
 
-  // IMPORTANT: keep this consistent with LOC source:
-  reposWithContributions: number; // == reposMatched
+  // Total repos the user has access to (owned + collaborator + org member)
+  reposWithContributions: number;
 };
 
 export async function getGitHubStatistics(
@@ -393,11 +445,14 @@ export async function getGitHubStatistics(
     async (fullName) => ({ fullName, res: await getContributorStatsForRepo(fullName, token) })
   );
 
+  // Collect repos still pending for a second pass
+  const pendingRepos: string[] = [];
+
   for (const item of results) {
     const r = item.res;
 
     if (r.status === "pending") {
-      reposPending += 1;
+      pendingRepos.push(item.fullName);
       continue;
     }
     if (r.status === "failed") {
@@ -416,6 +471,46 @@ export async function getGitHubStatistics(
     }
   }
 
+  // === Second pass: retry repos still pending with longer delays ===
+  if (pendingRepos.length > 0) {
+    // Wait longer before second pass to give GitHub time to compute
+    await sleep(3000);
+
+    // Clear short-lived cache entries for pending repos so we re-fetch
+    for (const fullName of pendingRepos) {
+      cache.delete(`contrib:${fullName}`);
+    }
+
+    const retryResults = await mapWithConcurrency(
+      pendingRepos,
+      concurrency,
+      async (fullName) => ({ fullName, res: await getContributorStatsForRepoLong(fullName, token) })
+    );
+
+    for (const item of retryResults) {
+      const r = item.res;
+
+      if (r.status === "pending") {
+        reposPending += 1;
+        continue;
+      }
+      if (r.status === "failed") {
+        reposFailed += 1;
+        continue;
+      }
+
+      const me = r.stats.find((x) => x.author?.login?.toLowerCase() === target);
+      if (!me) continue;
+
+      reposMatched += 1;
+      commitsCounted += me.total ?? 0;
+
+      for (const w of me.weeks ?? []) {
+        locChanged += (w.a ?? 0) + (w.d ?? 0);
+      }
+    }
+  }
+
   const finalStats: GitHubStatistics = {
     login: username,
     stars,
@@ -427,7 +522,7 @@ export async function getGitHubStatistics(
     reposMatched,
     reposPending,
     reposFailed,
-    reposWithContributions: reposMatched, // ✅ consistent with LOC scan
+    reposWithContributions: reposToScan.length, // total repos the user has access to via ownership/collaboration/org
   };
 
   // Only cache if we have good data (low pending/failed ratio)
